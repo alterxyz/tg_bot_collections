@@ -10,8 +10,8 @@ from openai import OpenAI
 import google.generativeai as genai
 from google.generativeai import ChatSession
 from google.generativeai.types.generation_types import StopCandidateException
+import cohere  # pip install cohere
 from telebot import TeleBot
-from together import Together
 from telebot.types import Message
 
 from . import *
@@ -52,13 +52,18 @@ convo = model.start_chat()
 #### ChatGPT init ####
 CHATGPT_API_KEY = environ.get("OPENAI_API_KEY")
 CHATGPT_BASE_URL = environ.get("OPENAI_API_BASE") or "https://api.openai.com/v1"
+COHERE_API_KEY = environ.get("COHERE_API_KEY")
+TELEGRA_PH_TOKEN = environ.get("TELEGRA_PH_TOKEN")
 QWEN_API_KEY = environ.get("TOGETHER_API_KEY")
 QWEN_MODEL = "Qwen/Qwen2-72B-Instruct"
 CHATGPT_PRO_MODEL = "gpt-4o-2024-05-13"
+COHERE_MODEL = "command-r-plus"
 
 
 client = OpenAI(api_key=CHATGPT_API_KEY, base_url=CHATGPT_BASE_URL, timeout=300)
-qwen_client = Together(api_key=QWEN_API_KEY, timeout=300)
+# qwen_client = Together(api_key=QWEN_API_KEY, timeout=300)
+co = cohere.Client(api_key=COHERE_API_KEY)
+ph = TelegraphAPI(TELEGRA_PH_TOKEN)
 
 
 def md_handler(message: Message, bot: TeleBot):
@@ -91,6 +96,7 @@ def latest_handle_messages(message: Message, bot: TeleBot):
             "sd",
             "map",
             "yi",
+            "cohere",
         )
     ):
         return
@@ -120,6 +126,7 @@ def answer_it_handler(message: Message, bot: TeleBot):
     latest_message = chat_message_dict.get(chat_id)
     m = latest_message.text.strip()
     m = enrich_text_with_urls(m)
+    full = ""
     ##### Gemini #####
     who = "Gemini Pro"
     # show something, make it more responsible
@@ -141,6 +148,8 @@ def answer_it_handler(message: Message, bot: TeleBot):
         convo.history.clear()
         bot_reply_markdown(reply_id, who, "Error", bot)
 
+    full += f"{who}:\n{s}"
+    chat_id_list = [reply_id.message_id]
     ##### ChatGPT #####
     who = "ChatGPT Pro"
     reply_id = bot_reply_first(latest_message, who, bot)
@@ -173,29 +182,60 @@ def answer_it_handler(message: Message, bot: TeleBot):
         print(e)
         bot_reply_markdown(reply_id, who, "answer wrong", bot)
 
-    ##### Qwen #####
-    who = "Qwen Pro"
+    full += f"\n---\n{who}:\n{s}"
+    chat_id_list.append(reply_id.message_id)
+
+    cohere_answer(latest_message, bot, full, m)
+    chat_id_list.append(reply_id.message_id)
+
+    ##### Cohere #####
+    if COHERE_API_KEY:
+        full, chat_id = cohere_answer(latest_message, bot, full, m)
+        chat_id_list.append(chat_id)
+    else:
+        pass
+
+    ##### Answer #####
+    if TELEGRA_PH_TOKEN:
+        final_answer(latest_message, bot, full, chat_id_list)
+    else:
+        pass
+
+
+def cohere_answer(latest_message: Message, bot: TeleBot, full, m):
+    """cohere answer"""
+    who = "Command R Plus"
     reply_id = bot_reply_first(latest_message, who, bot)
 
-    player_message = [{"role": "user", "content": m}]
+    player_message = [{"role": "User", "message": m}]
 
     try:
-        r = qwen_client.chat.completions.create(
-            messages=player_message,
-            max_tokens=4096,
-            model=QWEN_MODEL,
-            stream=True,
+        r = co.chat_stream(
+            model=COHERE_MODEL,
+            message=m,
+            temperature=0.4,
+            chat_history=player_message,
+            prompt_truncation="AUTO",
+            connectors=[{"id": "web-search"}],
+            citation_quality="fast",
         )
         s = ""
+        source = ""
         start = time.time()
-        for chunk in r:
-            if chunk.choices[0].delta.content is None:
+        for event in r:
+            if event.event_type == "text-generation":
+                s += event.text.encode("utf-8").decode("utf-8")
+                if time.time() - start > 1.2:
+                    start = time.time()
+                    bot_reply_markdown(reply_id, who, s, bot, split_text=False)
+            elif event.event_type == "search-results":
+                for doc in event.documents:
+                    source += f"\n[{doc['title']}]({doc['url']})"
+            elif event.event_type == "stream-end":
                 break
-            s += chunk.choices[0].delta.content
-            if time.time() - start > 1.2:
-                start = time.time()
-                bot_reply_markdown(reply_id, who, s, bot, split_text=False)
+
         # maybe not complete
+        # maybe the same message
         try:
             bot_reply_markdown(reply_id, who, s, bot)
         except:
@@ -203,10 +243,27 @@ def answer_it_handler(message: Message, bot: TeleBot):
 
     except Exception as e:
         print(e)
-        bot_reply_markdown(reply_id, who, "answer wrong", bot)
+        bot_reply_markdown(reply_id, who, "Answer wrong", bot)
+
+    content = s + "\n------\n" + source
+    full += f"\n---\n{who}:\n{content}"
+    chat_id = reply_id.chat.id
+    return full, chat_id
 
 
-if GOOGLE_GEMINI_KEY and CHATGPT_API_KEY and QWEN_API_KEY:
+def final_answer(latest_message: Message, bot: TeleBot, full, list):
+    """final answer"""
+    who = "Answer"
+    reply_id = bot_reply_first(latest_message, who, bot)
+    ph_s = ph.create_page_md(title="Answer it", markdown_text=full)
+    bot_reply_markdown(reply_id, who, f"[View]({ph_s})", bot)
+    # delete the chat message, only leave a telegra.ph link
+
+    # for i in list:
+    #     bot.delete_message(chat_id=chat_id, message_id=i)
+
+
+if GOOGLE_GEMINI_KEY and CHATGPT_API_KEY:
 
     def register(bot: TeleBot) -> None:
         bot.register_message_handler(md_handler, commands=["md"], pass_bot=True)

@@ -198,6 +198,7 @@ def image_to_data_uri(file_path):
         encoded_image = base64.b64encode(image_file.read()).decode("utf-8")
         return f"data:image/png;base64,{encoded_image}"
 
+
 """
 For getting the telegra.ph token with account in Telegram bot:
 1. https://t.me/telegraph
@@ -457,6 +458,7 @@ def md_to_dom(markdown_text):
             new_dom.append(parse_element(element))
 
     return new_dom
+
 
 # `import *` will give you these
 __all__ = [
